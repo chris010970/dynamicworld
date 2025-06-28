@@ -8,6 +8,10 @@ from the Dynamic World dataset.
 from io import BytesIO
 import requests
 
+import numpy as np
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+
 import ee
 import geemap
 
@@ -63,19 +67,15 @@ class Viz():
         # add results to interactive map
         for idx, dataset in enumerate( datasets ):
 
-            # display mode landcover
-            image = dataset[ 'mode' ]
-            m.addLayer( image.select( 'label' ),
-                       { 'min' : 0, 'max' : 8, 'palette' : colors },
-                        f'mode: {dataset[ "start" ]}',
-                        idx == 0 )
+            for k,v in dataset.items():
 
-            # display max median landcover
-            image = dataset[ 'max_median' ]
-            m.addLayer( image.select( 'label' ),
-                       { 'min' : 0, 'max' : 8, 'palette' : colors },
-                       f'median: {dataset[ "start" ]}',
-                       idx == 0 )
+                if isinstance( v, ee.Image ):
+
+                    # display mode landcover
+                    m.addLayer( v.select( 'label' ),
+                            { 'min' : 0, 'max' : 8, 'palette' : colors },
+                                f'{k}: { dataset[ "name" ] }',
+                                idx == 0 )
 
         # add legend
         m.add_legend( keys=keys, colors=colors, position='bottomleft' )
@@ -83,7 +83,7 @@ class Viz():
         # add layer control and centre to roi
         m.add_layer_control()
         return m
-
+    
 
     @staticmethod
     def get_animation( collection, **kwargs ):
@@ -123,14 +123,14 @@ class Viz():
 
 
     @staticmethod
-    def get_annotated_animation( collection, out_pathname=None, **kwargs ):
+    def get_annotated_animation(collection, out_pathname=None, **kwargs):
 
         """
-        Create an annotated animated GIF from an Earth Engine ImageCollection. Generates an 
+        Create annotated animated GIF from an Earth Engine ImageCollection. Generates an 
         animation from a time-series of images by visualizing land cover labels using a 
-        fixed color palette. Each frame is annotated with  the corresponding date. Optionally, 
-        the output can be saved to a file.
-
+        fixed color palette. Each frame is annotated with the corresponding date. Optionally, 
+        save output to a file.
+        
         Parameters
         ----------
         collection : ee.ImageCollection
@@ -139,7 +139,7 @@ class Viz():
             File path to save animated GIF
         **kwargs : dict, optional
             Additional keyword arguments:
-
+        
         Returns
         -------
         str or IPython.display.Image
@@ -148,74 +148,157 @@ class Viz():
         """
 
         # get default args
-        crs = kwargs.get( 'crs', 'EPSG:3857' )
-        dimensions = kwargs.get( 'dimensions', 512 )
-        fps = kwargs.get( 'framesPerSecond', 2 )
-        roi = kwargs.get( 'region', collection.first().geometry() )
+        crs = kwargs.get('crs', 'EPSG:3857')
+        dimensions = kwargs.get('dimensions', 512)
+        fps = kwargs.get('fps', 2)
+        roi = kwargs.get('region', collection.first().geometry())
+        annotation = kwargs.get('annotation', list())
 
         # inline map function to generate rgb images
-        def visualise_rgb( image ):
+        def visualise_rgb(image):
             return image.visualize(
-                            min=0,
-                            max=8,
-                            palette=list(DynamicWorld.legend.values())
-        ).set( {'system:time_start': image.get('system:time_start') } )
+                min=0,
+                max=8,
+                palette=list(DynamicWorld.legend.values())
+            ).set({'system:time_start': image.get('system:time_start')})
 
         # get rgb images
-        images = collection.map( visualise_rgb ).toList( collection.size() )
+        images = collection.map(visualise_rgb).toList(collection.size())
         frames = []
 
         # iterate over image frames
-        for idx in range( images.size().getInfo() ):
+        for idx in range(images.size().getInfo()):
 
-            # get image and date label
-            image = ee.Image( images.get( idx ) )
-            label = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo()
+            # get image
+            image = ee.Image(images.get(idx))
+
+            # get annotation label
+            if len(annotation) == images.size().getInfo():
+                label = annotation[idx]
+            else:
+                label = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo()
 
             # get thumbnail url
             url = image.getThumbURL({
-                    'region': roi,
-                    'dimensions': dimensions,
-                    'crs': crs
+                'region': roi,
+                'dimensions': dimensions,
+                'crs': crs
             })
 
             # retrieve byte image via url
-            response = requests.get(url)
-            byte_image = Image.open( BytesIO(response.content)).convert( 'RGB' )
+            response = requests.get(url, timeout=100)
+            byte_image = Image.open(BytesIO(response.content)).convert('RGB')
 
-            # annotate image frame with date label
-            draw = ImageDraw.Draw( byte_image )
+            # annotate image frame with date label and background
+            draw = ImageDraw.Draw(byte_image)
             font = ImageFont.load_default()
-            draw.text((10, byte_image.height - 20), label, font=font, fill='white' )
 
-            frames.append( byte_image )
+            # calculate text size and position using textbbox
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+
+            text_x = (byte_image.width - text_width) // 2
+            text_y = byte_image.height - text_height - 10
+
+            # draw background rectangle
+            padding = 4
+            draw.rectangle(
+                [
+                    text_x - padding,
+                    text_y - padding,
+                    text_x + text_width + padding,
+                    text_y + text_height + padding
+                ],
+                fill='white'
+            )
+
+            # draw text
+            draw.text((text_x, text_y), label, font=font, fill='black')
+
+            # append frame
+            frames.append(byte_image)
 
         # output filename defined
         if out_pathname:
-
-            # save animation as animiated gif
-            frames[0].save( out_pathname,
-                            save_all=True,
-                            append_images=frames[1:],
-                            duration=int(1000 / fps),
-                            loop=0
+            frames[0].save(
+                out_pathname,
+                save_all=True,
+                append_images=frames[1:],
+                duration=int(1000 / fps),
+                loop=0
             )
-
-            # return out pathname
             print(f'GIF saved to {out_pathname}')
             return out_pathname
         else:
-
-            # encode animation as interactive image
             buffer = BytesIO()
-            frames[0].save( buffer,
-                            format='GIF',
-                            save_all=True,
-                            append_images=frames[1:],
-                            duration=int(1000 / fps),
-                            loop=0
+            frames[0].save(
+                buffer,
+                format='GIF',
+                save_all=True,
+                append_images=frames[1:],
+                duration=int(1000 / fps),
+                loop=0
             )
+            buffer.seek(0)
+            return IPyImage(data=buffer.read())
 
-            # rewind and return ipython image
-            buffer.seek( 0 )
-            return IPyImage(data = buffer.read() )
+
+    @staticmethod
+    def plot_class_confidence_pdf( df, targets ):
+
+        """
+        Plot pdfs of mode and max median confidence scores
+        
+        Parameters
+        ----------
+        df : DataFrame
+            dataframe encoding class-indexed confidence scores
+        targets : list
+            list of classes        
+        """
+
+        # create subplot figure
+        _, axes = plt.subplots( figsize=(16,6),
+                                ncols=2,
+                                nrows=1 )
+        axes = np.ravel( axes )
+
+        # iterate over predictors
+        for axis_idx, method in enumerate( [ 'mode', 'max_median' ] ):
+
+            subset = df[ df.method == method ]
+            limits = []
+
+            # iterate over land cover classes
+            for label_idx, (k, v) in enumerate( list( DynamicWorld.legend.items() ) ):
+
+                if k in targets:
+
+                    # extract land cover samples
+                    data = subset[ subset.label == label_idx ][ 'confidence' ].values
+                    if len( data ) > 0:
+
+                        # compute mean and std
+                        mean = np.mean( data )
+                        std = np.std( data )
+
+                        # get min and max limits
+                        limits.append( ( mean - std * 2.5, mean + std * 2.5 ) )
+                        x = np.linspace( limits[-1][0], limits[-1][1], num=100 )
+
+                        # plot best fit gausssian function
+                        density = stats.gaussian_kde( data )
+                        axes[ axis_idx ].plot( x, density(x), color=v, label=k )
+
+            # update title and legend
+            axes[ axis_idx ].set_title( f'{method} : confidence scores' )
+            axes[ axis_idx ].set_ylabel( 'probability' )
+            axes[ axis_idx ].set_xlabel( 'frequency' )
+            axes[ axis_idx ].legend()
+
+            # tweak x-axis limits
+            axes[ axis_idx ].set_xlim( np.percentile( np.array( limits )[ :, 0 ], 70 ),
+                                    np.percentile( np.array( limits )[ :, 1 ], 70 ) )
+
+        return axes

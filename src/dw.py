@@ -43,6 +43,10 @@ class DynamicWorld( BaseCollector ):
                            'snow_and_ice'
     ]
 
+    # lookup tables
+    label_lut = list( range( len( probability_bands ) ) )
+    category_lut = [ 0, 1, 2, 3, 4, 2, 5, 6, 7 ] # water, land, urban, snow
+
     # standard legend
     legend = { 'water'   : '#419BDF',
                'trees'   : '#397D49', 
@@ -116,6 +120,7 @@ class DynamicWorld( BaseCollector ):
         return label.addBands(
             DynamicWorld.get_mode_confidence( collection, 'label', label )
         )
+    
 
     @staticmethod
     def get_mode_confidence( collection, band, target ):
@@ -190,12 +195,34 @@ class DynamicWorld( BaseCollector ):
             DynamicWorld.get_max_median_confidence( median.toArray() )
         )
 
-
     @staticmethod
-    def get_max_median_confidence( median_arr ):
+    def get_max_median_confidence( median_arr, method='margin' ):
 
         """
-        Compute per-pixel maximum median probability as confidence score
+        Seelct method to compute max median compositing confidence score
+
+        Parameters
+        ----------
+        median_arr : ee.Array
+            1D array comprising 9 class probability values 
+
+        Returns
+        -------
+        ee.Image
+            Median probability rescaled to integer percentage 
+        """
+
+        if method == 'top1':
+            return DynamicWorld.get_max_median_top1_confidence( median_arr )
+
+        return DynamicWorld.get_max_median_margin_confidence( median_arr )
+
+
+    @staticmethod
+    def get_max_median_top1_confidence( median_arr ):
+
+        """
+        Compute per-pixel top-1 maximum median probability as confidence score
 
         Parameters
         ----------
@@ -213,3 +240,36 @@ class DynamicWorld( BaseCollector ):
                     .multiply( 100 ).toInt() \
                     .rename('confidence')
         )
+
+
+    @staticmethod
+    def get_max_median_margin_confidence( median_arr ):
+
+        """
+        Compute per-pixel margin between the highest and second-highest 
+        median class probabilities to express classification certainty.
+
+        Parameters
+        ----------
+        median_arr : ee.Array
+            1D array of 9 class median probabilities.
+
+        Returns
+        -------
+        ee.Image
+            Median margin rescaled to integer percentage [0-100].
+        """
+
+        # sort median probabilities in descending order
+        sorted_arr = median_arr.arraySort()
+        length = median_arr.arrayLength(0)
+
+        # get top two values
+        top1 = sorted_arr.arrayGet(length.subtract(1))
+        top2 = sorted_arr.arrayGet(length.subtract(2))
+
+        # compute the difference
+        margin = top1.subtract( top2 )
+        return (margin.multiply( 100 )
+                    .toInt()
+                    .rename('confidence'))
